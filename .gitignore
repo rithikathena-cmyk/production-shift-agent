@@ -1,0 +1,22 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+env/
+
+# Streamlit
+.streamlit/secrets.toml
+
+# Claude Code local settings (machine-specific permissions)
+.claude/settings.local.json
+
+# Generated reports (regenerated at runtime; keep the folder via .gitkeep)
+reports/*.md
+reports/*.pdf
+
+# Scratch / temp
+_agg.ps1
+_agg.py
+*.log

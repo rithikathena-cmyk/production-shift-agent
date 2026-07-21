@@ -1,0 +1,6 @@
+streamlit==1.56.0
+pandas==3.0.3
+altair==5.5.0
+Markdown==3.10.2
+xhtml2pdf==0.2.17
+reportlab==4.5.1
