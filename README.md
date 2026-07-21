@@ -57,25 +57,41 @@ Then open http://localhost:8501.
 > the `python -m streamlit ...` form above — it runs through the trusted
 > interpreter.
 
-## Generate test data
+## Test data
 
-```bash
-python generate_test_data.py                 # today + yesterday, with a seeded anomaly
-python generate_test_data.py --no-anomaly    # a clean shift (no exceptions)
-python generate_test_data.py --seed 7 --current-date 2026-08-01 --previous-date 2026-07-31
-```
+Ready-made shift-log CSVs live in [`data/`](data/) so you can exercise the app
+and every anomaly path without generating anything. Each **current** file has a
+matching clean-baseline **previous** file for comparison.
+
+Scenario datasets (`shift_current_<scenario>_2026-07-22.csv` +
+`shift_previous_<scenario>_2026-07-21.csv`), each targeting one detection path:
+
+| Scenario            | What it exercises                                                        |
+|---------------------|--------------------------------------------------------------------------|
+| `clean`             | Healthy shift — no exceptions (control case)                             |
+| `welder-decline`    | Sustained low output + a zero-production stoppage + a >15-min downtime   |
+| `critical-downtime` | Multiple machines with >15-min downtime events                          |
+| `production-drop`   | Plant-wide output down ~30% (>10% drop)                                  |
+| `defect-surge`      | Line C defects spike well over +50%                                     |
+| `zero-production`   | Cutter-2 dead the entire shift                                          |
+| `mixed`             | Several anomalies across different lines (stress test)                  |
+
+Plain dated files (`shift_current_2026-07-14.csv`, `shift_previous.csv`,
+`shift_today.csv`, …) are additional sample shifts for ad-hoc runs.
+
+To use one in the app, upload the `current` CSV (and optionally its matching
+`previous` CSV) on the upload screen.
 
 ## Project layout
 
 ```
 production-shift-agent/
 ├── app.py                         # Streamlit UI + orchestration
-├── generate_test_data.py          # Synthetic shift-log generator
 ├── requirements.txt
 ├── .claude/agents/
 │   └── shift_report_agent.md       # The agent: rules, thresholds, report template
 ├── .streamlit/config.toml          # Theme
-├── data/                           # Shift log CSVs
+├── data/                           # Shift log CSVs (scenario + sample test data)
 ├── reports/                        # Generated reports (gitignored)
 └── prompts/                        # Prompt reference
 ```
