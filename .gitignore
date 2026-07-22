@@ -20,3 +20,6 @@ reports/*.pdf
 _agg.ps1
 _agg.py
 *.log
+
+# Data archives
+data.zip

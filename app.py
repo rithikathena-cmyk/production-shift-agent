@@ -1,10 +1,10 @@
 import base64
 import io
-import shutil
-import subprocess
+import os
 from pathlib import Path
 
 import altair as alt
+import anthropic
 import markdown as md
 import pandas as pd
 import streamlit as st
@@ -164,10 +164,26 @@ def detect_flags(cur: pd.DataFrame, prev: pd.DataFrame | None) -> list[tuple[str
 
 
 # -----------------------------
-# Claude report generator (single fast call, no tool loop)
+# Claude report generator (single fast Anthropic API call, no tool loop)
 # -----------------------------
 # Fast model — the numbers are pre-computed in pandas, Claude only writes prose.
 REPORT_MODEL = "claude-haiku-4-5-20251001"
+
+
+def _get_api_key() -> str | None:
+    """Resolve the Anthropic API key from the environment or Streamlit secrets.
+
+    Local dev: export ANTHROPIC_API_KEY.
+    Hosted (Streamlit Community Cloud / any host): set it as a secret, which the
+    platform exposes via st.secrets or the environment. Never commit the key.
+    """
+    key = os.environ.get("ANTHROPIC_API_KEY")
+    if key:
+        return key
+    try:
+        return st.secrets["ANTHROPIC_API_KEY"]  # raises if no secrets.toml at all
+    except Exception:
+        return None
 
 
 def _fmt_delta(cur_val, prev_val) -> str:
@@ -237,11 +253,14 @@ def generate_report(cur: pd.DataFrame, prev: pd.DataFrame | None,
                     flags: list[tuple[str, str]]) -> str:
     facts = build_facts(cur, prev, cur_name, prev_name, flags)
 
-    prompt = f"""You are an experienced manufacturing operations analyst writing a shift report for a plant supervisor.
+    system = (
+        "You are an experienced manufacturing operations analyst writing a shift "
+        "report for a plant supervisor. Use ONLY the pre-computed data provided. "
+        "Do NOT invent or recompute numbers — every figure must come from that data. "
+        "Return ONLY the Markdown report — no code fences, no preamble."
+    )
 
-Use ONLY the pre-computed data below. Do NOT read any files and do NOT invent or recompute numbers — every figure must come from this data.
-
-=== SHIFT DATA ===
+    prompt = f"""=== SHIFT DATA ===
 {facts}
 === END DATA ===
 
@@ -269,21 +288,30 @@ One bullet for EVERY detected anomaly listed above — include the machine/line,
 
 Return ONLY the Markdown report — no code fences, no preamble."""
 
-    claude_exe = shutil.which("claude") or "claude"
-    result = subprocess.run(
-        [claude_exe, "-p", "--model", REPORT_MODEL, "--strict-mcp-config", "--tools", ""],
-        input=prompt,
-        capture_output=True,
-        text=True,
-        encoding="utf-8",  # Claude emits UTF-8 (▲ ▼ · –); avoid Windows cp1252 mojibake
-        errors="replace",
-        cwd=str(Path(__file__).parent),
-        timeout=180,
-    )
-    if result.returncode != 0:
-        raise RuntimeError(result.stderr.strip() or result.stdout.strip())
+    api_key = _get_api_key()
+    if not api_key:
+        raise RuntimeError(
+            "ANTHROPIC_API_KEY is not set. Add it as a secret on your host "
+            "(e.g. Streamlit Community Cloud → App settings → Secrets) or export it "
+            "locally: `ANTHROPIC_API_KEY=sk-ant-...`"
+        )
 
-    output = result.stdout.strip()
+    client = anthropic.Anthropic(api_key=api_key)
+    try:
+        message = client.messages.create(
+            model=REPORT_MODEL,
+            max_tokens=4096,
+            system=system,
+            messages=[{"role": "user", "content": prompt}],
+        )
+    except anthropic.AuthenticationError as e:
+        raise RuntimeError("Anthropic API key is invalid or revoked.") from e
+    except anthropic.RateLimitError as e:
+        raise RuntimeError("Anthropic API rate limit hit — retry in a moment.") from e
+    except anthropic.APIStatusError as e:
+        raise RuntimeError(f"Anthropic API error ({e.status_code}): {e.message}") from e
+
+    output = "".join(b.text for b in message.content if b.type == "text").strip()
     if output.startswith("```"):
         nl = output.find("\n")
         if nl != -1:

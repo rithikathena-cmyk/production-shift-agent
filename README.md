@@ -42,16 +42,36 @@ python -m venv .venv
 pip install -r requirements.txt
 ```
 
-The report generator shells out to the [Claude Code](https://claude.com/claude-code)
-CLI (`claude`), so it must be installed and authenticated on the machine.
+The report generator calls the [Anthropic API](https://docs.claude.com) directly,
+so it needs an API key. Set it as `ANTHROPIC_API_KEY` — either exported in your
+shell or in `.streamlit/secrets.toml` (copy `.streamlit/secrets.toml.example`).
+The key is **never** committed (`secrets.toml` is gitignored).
 
 ## Run
 
 ```bash
+export ANTHROPIC_API_KEY=sk-ant-...   # or put it in .streamlit/secrets.toml
 python -m streamlit run app.py
 ```
 
 Then open http://localhost:8501.
+
+## Deploy
+
+The app is host-agnostic — it only needs Python, the `requirements.txt` deps, and
+the `ANTHROPIC_API_KEY` secret (no Claude CLI, no local auth).
+
+**Streamlit Community Cloud:**
+1. Push this repo to GitHub (the key stays out of git).
+2. On [share.streamlit.io](https://share.streamlit.io) → **New app**, point it at
+   this repo and `app.py`.
+3. **App settings → Secrets**, paste:
+   `ANTHROPIC_API_KEY = "sk-ant-..."`
+4. Deploy. Reports generate via the API using that secret.
+
+Any other host (Render, Railway, Fly.io, a container) works the same way — set
+`ANTHROPIC_API_KEY` as an environment variable / secret and run
+`streamlit run app.py`.
 
 > On Windows, if `streamlit.exe` is blocked by an Application Control policy, use
 > the `python -m streamlit ...` form above — it runs through the trusted
@@ -100,8 +120,9 @@ production-shift-agent/
 
 1. The app parses the uploaded CSV(s) with pandas and computes all metrics and
    anomaly flags locally (instant).
-2. On **Generate**, those precomputed facts are sent to Claude (Haiku) in a
-   single prompt — no file-reading tool loop — which writes the narrative report.
+2. On **Generate**, those precomputed facts are sent to Claude (Haiku) via a
+   single Anthropic API call — no file-reading tool loop — which writes the
+   narrative report.
 3. The Markdown is rendered to PDF (`markdown` → HTML → `xhtml2pdf`/`reportlab`)
    and auto-downloaded.
 
