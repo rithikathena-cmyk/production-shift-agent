@@ -1,6 +1,7 @@
 import base64
 import io
 import os
+import re
 from pathlib import Path
 
 import altair as alt
@@ -329,11 +330,55 @@ Return ONLY the Markdown report — no code fences, no preamble."""
 _PDF_GLYPHS = {"▲": "+", "▼": "-", "×": "x", "≥": ">=", "≤": "<=", "→": "->", "•": "-"}
 
 
+# Explicit per-column widths (percent) per report table, so xhtml2pdf's fixed
+# layout renders consistent, aligned columns. Matched by the table's headers;
+# unknown tables fall back to equal widths.
+def _table_col_widths(headers: list[str]) -> list[str]:
+    h = [x.strip().lower() for x in headers]
+    joined = " | ".join(h)
+    n = len(h) or 1
+    if "machine" in h and "notes" in joined:        # Downtime
+        return ["10%", "24%", "20%", "46%"]
+    if "vs previous shift" in joined:               # Production
+        return ["18%", "38%", "44%"]
+    if "defect rate" in joined:                     # Defects
+        return ["28%", "30%", "42%"]
+    if "metric" in h:                               # Comparison
+        return ["28%", "24%", "24%", "24%"]
+    return [f"{100 // n}%"] * n                      # equal fallback
+
+
+def _apply_col_widths(html_body: str) -> str:
+    """Set explicit widths on each table's header cells (fixed layout uses these)."""
+    def per_table(m: "re.Match[str]") -> str:
+        table = m.group(0)
+        thead = re.search(r"<thead>.*?</thead>", table, re.S)
+        if not thead:
+            return table
+        headers = [re.sub(r"<[^>]+>", "", c).strip()
+                   for c in re.findall(r"<th[^>]*>(.*?)</th>", thead.group(0), re.S)]
+        if not headers:
+            return table
+        widths = _table_col_widths(headers)
+        counter = {"i": 0}
+
+        def add_width(mth: "re.Match[str]") -> str:
+            i = counter["i"]
+            counter["i"] += 1
+            w = widths[i] if i < len(widths) else ""
+            return f'<th style="width:{w}">{mth.group(1)}</th>' if w else mth.group(0)
+
+        new_thead = re.sub(r"<th[^>]*>(.*?)</th>", add_width, thead.group(0), flags=re.S)
+        return table.replace(thead.group(0), new_thead)
+
+    return re.sub(r"<table.*?</table>", per_table, html_body, flags=re.S)
+
+
 def md_to_pdf(md_text: str) -> bytes:
     for k, v in _PDF_GLYPHS.items():
         md_text = md_text.replace(k + " ", v).replace(k, v)
 
-    body = md.markdown(md_text, extensions=["tables", "sane_lists"])
+    body = _apply_col_widths(md.markdown(md_text, extensions=["tables", "sane_lists"]))
     html = f"""<!DOCTYPE html><html><head><meta charset="utf-8"><style>
       @page {{ size: A4; margin: 1.6cm; }}
       body {{ font-family: Helvetica, sans-serif; font-size: 10pt; color:#1f2937; line-height:1.45; }}
