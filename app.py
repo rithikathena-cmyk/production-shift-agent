@@ -339,9 +339,12 @@ def md_to_pdf(md_text: str) -> bytes:
       body {{ font-family: Helvetica, sans-serif; font-size: 10pt; color:#1f2937; line-height:1.45; }}
       h1 {{ font-size:20pt; color:#1e3a8a; border-bottom:2px solid #2563eb; padding-bottom:4px; }}
       h2 {{ font-size:13pt; color:#2563eb; margin-top:14px; }}
-      table {{ width:100%; border-collapse:collapse; margin:8px 0; }}
-      th {{ background-color:#2563eb; color:#ffffff; padding:5px 8px; text-align:left; font-size:9pt; }}
-      td {{ border:1px solid #d1d5db; padding:5px 8px; font-size:9pt; }}
+      table {{ width:100%; border-collapse:collapse; margin:8px 0; table-layout:fixed; }}
+      th {{ background-color:#2563eb; color:#ffffff; border:1px solid #2563eb;
+           padding:5px 8px; text-align:left; font-size:9pt;
+           word-wrap:break-word; vertical-align:top; }}
+      td {{ border:1px solid #d1d5db; padding:5px 8px; font-size:9pt;
+           word-wrap:break-word; vertical-align:top; }}
       li {{ margin-bottom:3px; }}
     </style></head><body>{body}</body></html>"""
 
