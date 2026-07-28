@@ -1,16 +1,25 @@
 import base64
 import io
-import os
 import re
 from pathlib import Path
 
 import altair as alt
-import anthropic
 import markdown as md
 import pandas as pd
 import streamlit as st
 import streamlit.components.v1 as components
 from xhtml2pdf import pisa
+
+from agents.report_agent import REPORT_MODEL, generate_report
+from shift_metrics import (
+    DEFECT_SURGE_LIMIT,
+    DOWNTIME_LIMIT,
+    PROD_DROP_LIMIT,
+    detect_flags,
+    load_shift,
+    pct_delta,
+    totals,
+)
 
 # -----------------------------
 # Configuration
@@ -21,20 +30,6 @@ DATA_DIR.mkdir(exist_ok=True)
 REPORTS_DIR.mkdir(exist_ok=True)
 
 STORED_PREVIOUS = DATA_DIR / "shift_previous.csv"
-
-REQUIRED_COLUMNS = [
-    "timestamp",
-    "line",
-    "machine",
-    "units_produced",
-    "downtime_minutes",
-    "defects",
-]
-
-# Anomaly thresholds — mirror .claude/agents/shift_report_agent.md (source of truth)
-DOWNTIME_LIMIT = 15   # minutes, per machine reading
-PROD_DROP_LIMIT = 10  # percent, per line vs previous
-DEFECT_SURGE_LIMIT = 50  # percent, total vs previous
 
 st.set_page_config(
     page_title="Production Shift Report Agent",
@@ -88,238 +83,6 @@ st.markdown(
     """,
     unsafe_allow_html=True,
 )
-
-
-# -----------------------------
-# Data helpers
-# -----------------------------
-def load_shift(path: Path) -> pd.DataFrame:
-    """Read a shift CSV, validate columns, and coerce numerics (missing -> 0)."""
-    df = pd.read_csv(path)
-    missing = [c for c in REQUIRED_COLUMNS if c not in df.columns]
-    if missing:
-        raise ValueError(f"Missing required column(s): {', '.join(missing)}")
-    for col in ("units_produced", "downtime_minutes", "defects"):
-        df[col] = pd.to_numeric(df[col], errors="coerce").fillna(0)
-    return df.sort_values("timestamp").reset_index(drop=True)
-
-
-def totals(df: pd.DataFrame) -> dict:
-    units = int(df["units_produced"].sum())
-    defects = int(df["defects"].sum())
-    return {
-        "units": units,
-        "downtime": int(df["downtime_minutes"].sum()),
-        "defects": defects,
-        "defect_rate": (defects / units * 100) if units else 0.0,
-    }
-
-
-def pct_delta(current: float, previous: float):
-    """Return a signed percentage change, or None if no baseline."""
-    if not previous:
-        return None
-    return (current - previous) / previous * 100
-
-
-def detect_flags(cur: pd.DataFrame, prev: pd.DataFrame | None) -> list[tuple[str, str]]:
-    """Client-side anomaly detection mirroring the agent's rules.
-
-    Returns a list of (severity, message) where severity is 'bad' or 'warn'.
-    """
-    flags: list[tuple[str, str]] = []
-
-    # Excessive downtime on any single reading
-    hot = cur[cur["downtime_minutes"] > DOWNTIME_LIMIT]
-    for _, r in hot.iterrows():
-        flags.append(
-            ("bad", f"{r['machine']} (Line {r['line']}): "
-                    f"{int(r['downtime_minutes'])} min downtime at {r['timestamp']} "
-                    f"(> {DOWNTIME_LIMIT} min)")
-        )
-
-    # Zero-production readings
-    zero = cur[cur["units_produced"] == 0]
-    for _, r in zero.iterrows():
-        flags.append(
-            ("bad", f"{r['machine']} (Line {r['line']}): zero production at {r['timestamp']}")
-        )
-
-    if prev is not None:
-        # Per-line production drop
-        cu = cur.groupby("line")["units_produced"].sum()
-        pu = prev.groupby("line")["units_produced"].sum()
-        for line in cu.index:
-            d = pct_delta(cu[line], pu.get(line, 0))
-            if d is not None and d < -PROD_DROP_LIMIT:
-                flags.append(
-                    ("warn", f"Line {line}: production down {abs(d):.1f}% vs previous "
-                             f"(> {PROD_DROP_LIMIT}% drop)")
-                )
-        # Total defect surge
-        d = pct_delta(int(cur["defects"].sum()), int(prev["defects"].sum()))
-        if d is not None and d > DEFECT_SURGE_LIMIT:
-            flags.append(("warn", f"Total defects up {d:.0f}% vs previous (> {DEFECT_SURGE_LIMIT}% surge)"))
-
-    return flags
-
-
-# -----------------------------
-# Claude report generator (single fast Anthropic API call, no tool loop)
-# -----------------------------
-# Fast model — the numbers are pre-computed in pandas, Claude only writes prose.
-REPORT_MODEL = "claude-haiku-4-5-20251001"
-
-
-def _get_api_key() -> str | None:
-    """Resolve the Anthropic API key from the environment or Streamlit secrets.
-
-    Local dev: export ANTHROPIC_API_KEY.
-    Hosted (Streamlit Community Cloud / any host): set it as a secret, which the
-    platform exposes via st.secrets or the environment. Never commit the key.
-    """
-    key = os.environ.get("ANTHROPIC_API_KEY")
-    if key:
-        return key
-    try:
-        return st.secrets["ANTHROPIC_API_KEY"]  # raises if no secrets.toml at all
-    except Exception:
-        return None
-
-
-def _fmt_delta(cur_val, prev_val) -> str:
-    d = pct_delta(cur_val, prev_val)
-    return f"{d:+.1f}%" if d is not None else "n/a"
-
-
-def build_facts(cur: pd.DataFrame, prev: pd.DataFrame | None,
-                cur_name: str, prev_name: str | None,
-                flags: list[tuple[str, str]]) -> str:
-    """Turn the already-computed pandas data into a compact facts block."""
-    ct = totals(cur)
-    pt = totals(prev) if prev is not None else None
-    L: list[str] = []
-
-    L.append(f"Current shift file: {cur_name} "
-             f"({cur['timestamp'].nunique()} intervals, "
-             f"{cur['timestamp'].min()}-{cur['timestamp'].max()})")
-    if prev is not None:
-        L.append(f"Previous shift file: {prev_name} ({prev['timestamp'].nunique()} intervals)")
-    else:
-        L.append("Previous shift: NONE — no comparison available.")
-
-    L.append("\nOVERALL TOTALS:")
-    if pt:
-        L.append(f"- Units produced: {ct['units']} (previous {pt['units']}, {_fmt_delta(ct['units'], pt['units'])})")
-        L.append(f"- Downtime minutes: {ct['downtime']} (previous {pt['downtime']}, {_fmt_delta(ct['downtime'], pt['downtime'])})")
-        L.append(f"- Defects: {ct['defects']} (previous {pt['defects']}, {_fmt_delta(ct['defects'], pt['defects'])})")
-        L.append(f"- Defect rate: {ct['defect_rate']:.2f}% (previous {pt['defect_rate']:.2f}%)")
-    else:
-        L.append(f"- Units produced: {ct['units']}")
-        L.append(f"- Downtime minutes: {ct['downtime']}")
-        L.append(f"- Defects: {ct['defects']}")
-        L.append(f"- Defect rate: {ct['defect_rate']:.2f}%")
-
-    cu = cur.groupby("line")["units_produced"].sum()
-    pu = prev.groupby("line")["units_produced"].sum() if prev is not None else None
-    L.append("\nUNITS BY LINE:")
-    for line in cu.index:
-        if pu is not None:
-            L.append(f"- Line {line}: {int(cu[line])} "
-                     f"(previous {int(pu.get(line, 0))}, {_fmt_delta(cu[line], pu.get(line, 0))})")
-        else:
-            L.append(f"- Line {line}: {int(cu[line])}")
-
-    cf = cur.groupby("line")["defects"].sum()
-    cfu = cur.groupby("line")["units_produced"].sum()
-    L.append("\nDEFECTS BY LINE (defects, rate%):")
-    for line in cf.index:
-        rate = (cf[line] / cfu[line] * 100) if cfu[line] else 0
-        L.append(f"- Line {line}: {int(cf[line])} ({rate:.2f}%)")
-
-    dm = cur.groupby(["line", "machine"])["downtime_minutes"].sum()
-    dm = dm[dm > 0].sort_values(ascending=False)
-    L.append("\nDOWNTIME BY MACHINE (>0 min):")
-    L.extend([f"- {machine} (Line {line}): {int(mins)} min" for (line, machine), mins in dm.items()]
-             or ["- none"])
-
-    L.append("\nDETECTED ANOMALIES (include EVERY one of these in the Exceptions section):")
-    L.extend([f"- [{sev.upper()}] {msg}" for sev, msg in flags] or ["- none detected"])
-
-    return "\n".join(L)
-
-
-def generate_report(cur: pd.DataFrame, prev: pd.DataFrame | None,
-                    cur_name: str, prev_name: str | None,
-                    flags: list[tuple[str, str]]) -> str:
-    facts = build_facts(cur, prev, cur_name, prev_name, flags)
-
-    system = (
-        "You are an experienced manufacturing operations analyst writing a shift "
-        "report for a plant supervisor. Use ONLY the pre-computed data provided. "
-        "Do NOT invent or recompute numbers — every figure must come from that data. "
-        "Return ONLY the Markdown report — no code fences, no preamble."
-    )
-
-    prompt = f"""=== SHIFT DATA ===
-{facts}
-=== END DATA ===
-
-Write a concise, professional Production Shift Report in clean Markdown with EXACTLY these sections:
-
-# Production Shift Report
-
-## Summary
-2-4 sentences: total units, downtime, defects, and an overall assessment.
-
-## Production
-Markdown table: Line | Units Produced | vs Previous Shift. Then a bold Total line.
-
-## Downtime
-Markdown table: Line | Machine | Downtime (mins) | Notes. Only machines with downtime > 0. Then bold Total Downtime.
-
-## Defects
-Markdown table: Line | Defects | Defect Rate (%). Then bold Total Defects.
-
-## Comparison with Previous Shift
-Markdown table: Metric | Current Shift | Previous Shift | Change for Units, Downtime, Defects. Use the ▲ symbol for an increase and ▼ for a decrease. If there is no previous shift, state that comparison is unavailable.
-
-## Exceptions
-One bullet for EVERY detected anomaly listed above — include the machine/line, the values, and a one-line actionable recommendation. If none, write "No exceptions detected."
-
-Return ONLY the Markdown report — no code fences, no preamble."""
-
-    api_key = _get_api_key()
-    if not api_key:
-        raise RuntimeError(
-            "ANTHROPIC_API_KEY is not set. Add it as a secret on your host "
-            "(e.g. Streamlit Community Cloud → App settings → Secrets) or export it "
-            "locally: `ANTHROPIC_API_KEY=sk-ant-...`"
-        )
-
-    client = anthropic.Anthropic(api_key=api_key)
-    try:
-        message = client.messages.create(
-            model=REPORT_MODEL,
-            max_tokens=4096,
-            system=system,
-            messages=[{"role": "user", "content": prompt}],
-        )
-    except anthropic.AuthenticationError as e:
-        raise RuntimeError("Anthropic API key is invalid or revoked.") from e
-    except anthropic.RateLimitError as e:
-        raise RuntimeError("Anthropic API rate limit hit — retry in a moment.") from e
-    except anthropic.APIStatusError as e:
-        raise RuntimeError(f"Anthropic API error ({e.status_code}): {e.message}") from e
-
-    output = "".join(b.text for b in message.content if b.type == "text").strip()
-    if output.startswith("```"):
-        nl = output.find("\n")
-        if nl != -1:
-            output = output[nl + 1:]
-        if output.rstrip().endswith("```"):
-            output = output.rstrip()[:-3]
-    return output.strip()
 
 
 # -----------------------------
@@ -771,4 +534,4 @@ with tab_report:
         )
         st.markdown(report_md)
     else:
-        st.info("Press **🚀 Generate Shift Report** to produce the full supervisor report here.")
+        st.info("Press ** Generate Shift Report** to produce the full supervisor report here.")

@@ -106,14 +106,19 @@ To use one in the app, upload the `current` CSV (and optionally its matching
 
 ```
 production-shift-agent/
-├── app.py                         # Streamlit UI + orchestration
+├── app.py                         # Streamlit UI, charts, PDF export
+├── shift_metrics.py               # CSV loading, aggregation, anomaly-detection rules
+├── agents/
+│   ├── report_agent.py             # Claude API call: builds the facts block, calls the model
+│   └── prompts/
+│       ├── system_prompt.md         # System prompt for the in-app report generator
+│       └── report_prompt.md         # User prompt template (report structure)
 ├── requirements.txt
 ├── .claude/agents/
-│   └── shift_report_agent.md       # The agent: rules, thresholds, report template
+│   └── shift_report_agent.md       # The Claude Code agent: rules, thresholds, report template
 ├── .streamlit/config.toml          # Theme
 ├── data/                           # Shift log CSVs (scenario + sample test data)
-├── reports/                        # Generated reports (gitignored)
-└── prompts/                        # Prompt reference
+└── reports/                        # Generated reports (gitignored)
 ```
 
 ## How it works
@@ -126,5 +131,7 @@ production-shift-agent/
 3. The Markdown is rendered to PDF (`markdown` → HTML → `xhtml2pdf`/`reportlab`)
    and auto-downloaded.
 
-All report logic (thresholds, sections, wording) lives in
-`.claude/agents/shift_report_agent.md` — change it there, no app code changes needed.
+Anomaly thresholds live in `shift_metrics.py`; the wording sent to Claude lives in
+`agents/prompts/` — change either without touching the Streamlit UI code in `app.py`.
+`.claude/agents/shift_report_agent.md` documents the same rules and template for
+the Claude Code agent version of this workflow.
