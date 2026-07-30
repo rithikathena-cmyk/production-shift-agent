@@ -82,12 +82,12 @@ Any other host (Render, Railway, Fly.io, a container) works the same way — set
 
 ## Test data
 
-Ready-made shift-log CSVs live in [`data/`](data/) so you can exercise the app
+Ready-made shift-log CSVs live under [`data/`](data/) so you can exercise the app
 and every anomaly path without generating anything. Each **current** file has a
 matching clean-baseline **previous** file for comparison.
 
-Scenario datasets (`shift_current_<scenario>_2026-07-22.csv` +
-`shift_previous_<scenario>_2026-07-21.csv`), each targeting one detection path:
+`data/scenarios/` — one pair per detection path (`shift_current_<scenario>_2026-07-22.csv`
++ `shift_previous_<scenario>_2026-07-21.csv`):
 
 | Scenario            | What it exercises                                                        |
 |---------------------|--------------------------------------------------------------------------|
@@ -99,8 +99,12 @@ Scenario datasets (`shift_current_<scenario>_2026-07-22.csv` +
 | `zero-production`   | Cutter-2 dead the entire shift                                          |
 | `mixed`             | Several anomalies across different lines (stress test)                  |
 
-Plain dated files (`shift_current_2026-07-14.csv`, `shift_previous.csv`,
-`shift_today.csv`, …) are additional sample shifts for ad-hoc runs.
+`data/history/` — plain dated current/previous pairs (`shift_current_2026-07-14.csv`,
+`shift_previous_2026-07-13.csv`, …) for ad-hoc runs.
+
+`data/shift_previous.csv` and `data/shift_today.csv` sit at the top level — the
+app falls back to `shift_previous.csv` automatically when no previous-shift file
+is uploaded (see `STORED_PREVIOUS` in `app.py`).
 
 To use one in the app, upload the `current` CSV (and optionally its matching
 `previous` CSV) on the upload screen.
@@ -120,7 +124,11 @@ production-shift-agent/
 ├── .claude/agents/
 │   └── shift_report_agent.md       # The Claude Code agent: same rules/template, CLI workflow
 ├── .streamlit/config.toml          # Theme
-├── data/                           # Shift log CSVs (scenario + sample test data)
+├── data/
+│   ├── shift_previous.csv           # Stored fallback previous-shift file
+│   ├── shift_today.csv              # Ready "current" file for a quick demo
+│   ├── history/                     # Plain dated current/previous pairs
+│   └── scenarios/                   # One current/previous pair per anomaly path
 └── reports/                        # Generated reports (gitignored)
 ```
 
