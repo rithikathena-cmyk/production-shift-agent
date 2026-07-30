@@ -242,7 +242,7 @@ if not st.session_state.get("analyzed"):
         + (f"  +  **{previous_path.name}**" if previous_path else "  (no previous shift)")
     )
     st.info("Files uploaded. Press **Analyze shift** to have Claude compute metrics and enable the report.")
-    if st.button("▶️ Analyze shift", type="primary", use_container_width=True):
+    if st.button("▶️ Analyze shift", type="primary", width="stretch"):
         try:
             with st.spinner(f"🤖 Analyzing with Claude ({REPORT_MODEL})…"):
                 st.session_state["analysis"] = analyze_shift(
@@ -343,7 +343,7 @@ with tab_charts:
         )
         .properties(height=300, title="Units produced across the shift (by line)")
     )
-    st.altair_chart(units_ts, use_container_width=True)
+    st.altair_chart(units_ts, width="stretch")
 
     c1, c2 = st.columns(2)
 
@@ -360,7 +360,7 @@ with tab_charts:
         )
         .properties(height=300, title="Total units by machine")
     )
-    c1.altair_chart(bar_m, use_container_width=True)
+    c1.altair_chart(bar_m, width="stretch")
 
     # 2b) Defect rate by line.
     dl = by_line.rename(columns={"defect_rate": "rate"})
@@ -376,7 +376,7 @@ with tab_charts:
         )
         .properties(height=300, title="Defect rate by line")
     )
-    c2.altair_chart(bar_d, use_container_width=True)
+    c2.altair_chart(bar_d, width="stretch")
 
     # 3) Downtime heatmap — machine × time (sequential single-hue blue).
     hm = pd.DataFrame(charts["downtime_heatmap"])
@@ -394,7 +394,7 @@ with tab_charts:
         )
         .properties(height=230, title="Downtime heatmap — machine × time")
     )
-    st.altair_chart(heat, use_container_width=True)
+    st.altair_chart(heat, width="stretch")
 
     c3, c4 = st.columns(2)
 
@@ -412,7 +412,7 @@ with tab_charts:
         )
         .properties(height=300, title="Defects across the shift (by line)")
     )
-    c3.altair_chart(def_ts, use_container_width=True)
+    c3.altair_chart(def_ts, width="stretch")
 
     # 4b) Units vs defects per machine, bubble sized by downtime.
     ms = pd.DataFrame(charts["machine_summary"])
@@ -430,12 +430,12 @@ with tab_charts:
         )
         .properties(height=300, title="Units vs defects by machine (size = downtime)")
     )
-    c4.altair_chart(bubble, use_container_width=True)
+    c4.altair_chart(bubble, width="stretch")
 
 with tab_data:
     st.dataframe(
         current_df,
-        use_container_width=True,
+        width="stretch",
         hide_index=True,
         height=360,
         column_config={
@@ -452,7 +452,7 @@ with tab_data:
 # (analysis["report_markdown"]) — this just packages it as MD/PDF and
 # triggers the download, with no second API call.
 st.divider()
-if st.button("🚀 Generate Shift Report", type="primary", use_container_width=True):
+if st.button("🚀 Generate Shift Report", type="primary", width="stretch"):
     try:
         with st.status("Preparing report…", expanded=True) as status:
             report = analysis["report_markdown"]
@@ -510,7 +510,7 @@ with tab_report:
                 file_name="shift_report.pdf",
                 mime="application/pdf",
                 type="primary",
-                use_container_width=True,
+                width="stretch",
             )
         except Exception as e:  # noqa: BLE001
             dl_pdf.error(f"PDF failed: {e}")
@@ -520,7 +520,7 @@ with tab_report:
             data=report_md,
             file_name="shift_report.md",
             mime="text/markdown",
-            use_container_width=True,
+            width="stretch",
         )
         st.markdown(report_md)
     else:
