@@ -10,16 +10,8 @@ import streamlit as st
 import streamlit.components.v1 as components
 from xhtml2pdf import pisa
 
-from agents.report_agent import REPORT_MODEL, generate_report
-from shift_metrics import (
-    DEFECT_SURGE_LIMIT,
-    DOWNTIME_LIMIT,
-    PROD_DROP_LIMIT,
-    detect_flags,
-    load_shift,
-    pct_delta,
-    totals,
-)
+from agents.report_agent import REPORT_MODEL, analyze_shift
+from shift_metrics import load_shift
 
 # -----------------------------
 # Configuration
@@ -176,14 +168,11 @@ with st.sidebar:
                                      help="Optional — falls back to the stored data/shift_previous.csv.")
 
     st.divider()
-    st.caption("**Anomaly thresholds**")
-    st.markdown(
-        f"- Downtime **> {DOWNTIME_LIMIT} min** / reading\n"
-        f"- Production drop **> {PROD_DROP_LIMIT}%** / line\n"
-        f"- Defect surge **> {DEFECT_SURGE_LIMIT}%** total\n"
-        f"- Any **zero-production** reading"
+    st.caption(
+        "🤖 All totals, breakdowns, charts, and anomaly detection are computed "
+        "by Claude directly from the raw CSV — nothing is pre-aggregated in Python."
     )
-    st.caption("Defined in `.claude/agents/shift_report_agent.md`")
+    st.caption("Rules defined in `.claude/agents/shift_report_agent.md`")
 
 
 # -----------------------------
@@ -249,50 +238,55 @@ if not st.session_state.get("analyzed"):
         f"📄 Ready: **{current_path.name}**"
         + (f"  +  **{previous_path.name}**" if previous_path else "  (no previous shift)")
     )
-    st.info("Files uploaded. Press **Analyze shift** to compute metrics and enable the report.")
+    st.info("Files uploaded. Press **Analyze shift** to have Claude compute metrics and enable the report.")
     if st.button("▶️ Analyze shift", type="primary", use_container_width=True):
-        st.session_state["analyzed"] = True
-        st.rerun()
+        try:
+            with st.spinner(f"🤖 Analyzing with Claude ({REPORT_MODEL})…"):
+                st.session_state["analysis"] = analyze_shift(
+                    current_df, previous_df,
+                    current_path.name, previous_path.name if previous_path else None,
+                )
+            st.session_state["analyzed"] = True
+            st.rerun()
+        except Exception as e:  # noqa: BLE001
+            st.error(f"Error analyzing shift:\n\n{e}")
     st.stop()
+
+analysis = st.session_state["analysis"]
 
 
 # -----------------------------
 # Live KPI row
 # -----------------------------
-cur_t = totals(current_df)
-prev_t = totals(previous_df) if previous_df is not None else None
+cur_t = analysis["current_totals"]
+prev_t = analysis["previous_totals"]
+deltas = analysis["deltas"]
 
 src_note = "vs uploaded previous shift" if previous_file else (
     "vs stored previous shift" if previous_path else "no baseline")
-st.caption(f"📊 Live metrics from **{current_path.name}** · {src_note}")
+st.caption(f"📊 Metrics from **{current_path.name}** · {src_note}")
 
 k1, k2, k3, k4 = st.columns(4)
 
 
-def _delta(cur_val, prev_val):
-    if prev_t is None:
-        return None
-    d = pct_delta(cur_val, prev_val)
-    return f"{d:+.1f}% vs prev" if d is not None else None
+def _fmt_pct(v):
+    return f"{v:+.1f}% vs prev" if v is not None else None
 
 
-k1.metric("Units produced", f"{cur_t['units']:,}",
-          _delta(cur_t["units"], prev_t["units"]) if prev_t else None)
-k2.metric("Downtime (min)", f"{cur_t['downtime']:,}",
-          _delta(cur_t["downtime"], prev_t["downtime"]) if prev_t else None,
+k1.metric("Units produced", f"{cur_t['units']:,}", _fmt_pct(deltas["units_pct"]) if prev_t else None)
+k2.metric("Downtime (min)", f"{cur_t['downtime']:,}", _fmt_pct(deltas["downtime_pct"]) if prev_t else None,
           delta_color="inverse")
-k3.metric("Defects", f"{cur_t['defects']:,}",
-          _delta(cur_t["defects"], prev_t["defects"]) if prev_t else None,
+k3.metric("Defects", f"{cur_t['defects']:,}", _fmt_pct(deltas["defects_pct"]) if prev_t else None,
           delta_color="inverse")
 k4.metric("Defect rate", f"{cur_t['defect_rate']:.2f}%",
-          (f"{cur_t['defect_rate'] - prev_t['defect_rate']:+.2f} pts" if prev_t else None),
+          (f"{deltas['defect_rate_pts']:+.2f} pts" if prev_t and deltas["defect_rate_pts"] is not None else None),
           delta_color="inverse")
 
 
 # -----------------------------
-# Instant anomaly flags
+# Anomaly flags
 # -----------------------------
-flags = detect_flags(current_df, previous_df)
+flags = [(a["severity"], a["message"]) for a in analysis["anomalies"]]
 st.subheader("🚨 Anomaly check")
 if not flags:
     st.markdown('<span class="pill pill-ok">✔ No anomalies detected</span>', unsafe_allow_html=True)
@@ -329,8 +323,11 @@ with tab_charts:
         d["ts"] = pd.to_datetime("2000-01-01 " + d["timestamp"].astype(str))
         return d
 
+    charts = analysis["charts"]
+    by_line = pd.DataFrame(analysis["by_line"])
+
     # 1) Hero time-series — units produced across the shift, one line per line.
-    ut = with_ts(current_df.groupby(["timestamp", "line"], as_index=False)["units_produced"].sum())
+    ut = with_ts(pd.DataFrame(charts["units_by_time"]))
     units_ts = (
         alt.Chart(ut)
         .mark_line(point=alt.OverlayMarkDef(size=40, filled=True), strokeWidth=2.5)
@@ -348,7 +345,7 @@ with tab_charts:
     c1, c2 = st.columns(2)
 
     # 2a) Total units by machine — horizontal ranking, colored by its line.
-    mu = current_df.groupby(["machine", "line"], as_index=False)["units_produced"].sum()
+    mu = pd.DataFrame(charts["machine_summary"]).rename(columns={"units": "units_produced"})
     bar_m = (
         alt.Chart(mu)
         .mark_bar(cornerRadiusEnd=4)
@@ -363,9 +360,7 @@ with tab_charts:
     c1.altair_chart(bar_m, use_container_width=True)
 
     # 2b) Defect rate by line.
-    dl = current_df.groupby("line", as_index=False).agg(
-        defects=("defects", "sum"), units=("units_produced", "sum"))
-    dl["rate"] = (dl["defects"] / dl["units"].where(dl["units"] != 0, 1) * 100).round(2)
+    dl = by_line.rename(columns={"defect_rate": "rate"})
     bar_d = (
         alt.Chart(dl)
         .mark_bar(cornerRadiusEnd=4)
@@ -381,7 +376,7 @@ with tab_charts:
     c2.altair_chart(bar_d, use_container_width=True)
 
     # 3) Downtime heatmap — machine × time (sequential single-hue blue).
-    hm = current_df.groupby(["machine", "timestamp"], as_index=False)["downtime_minutes"].sum()
+    hm = pd.DataFrame(charts["downtime_heatmap"])
     heat = (
         alt.Chart(hm)
         .mark_rect(stroke="#ffffff", strokeWidth=0.5)
@@ -401,7 +396,7 @@ with tab_charts:
     c3, c4 = st.columns(2)
 
     # 4a) Defects across the shift, one line per line.
-    dts = with_ts(current_df.groupby(["timestamp", "line"], as_index=False)["defects"].sum())
+    dts = with_ts(pd.DataFrame(charts["defects_by_time"]))
     def_ts = (
         alt.Chart(dts)
         .mark_line(point=alt.OverlayMarkDef(size=35, filled=True), strokeWidth=2.5)
@@ -417,9 +412,7 @@ with tab_charts:
     c3.altair_chart(def_ts, use_container_width=True)
 
     # 4b) Units vs defects per machine, bubble sized by downtime.
-    ms = current_df.groupby(["machine", "line"], as_index=False).agg(
-        units=("units_produced", "sum"), defects=("defects", "sum"),
-        downtime=("downtime_minutes", "sum"))
+    ms = pd.DataFrame(charts["machine_summary"])
     bubble = (
         alt.Chart(ms)
         .mark_circle(opacity=0.85, stroke="#ffffff", strokeWidth=1)
@@ -452,27 +445,21 @@ with tab_data:
 # -----------------------------
 # Generate report
 # -----------------------------
+# The Markdown report was already written by Claude during analysis
+# (analysis["report_markdown"]) — this just packages it as MD/PDF and
+# triggers the download, with no second API call.
 st.divider()
 if st.button("🚀 Generate Shift Report", type="primary", use_container_width=True):
-    import time
     try:
-        with st.status("Generating report…", expanded=True) as status:
-            st.write("🧮 Metrics already computed in-app — sending them to Claude…")
-            st.write(f"🤖 One fast call ({REPORT_MODEL.split('-')[1].title()}), no file-reading loop…")
-            t0 = time.perf_counter()
-            report = generate_report(
-                current_df, previous_df,
-                current_path.name, previous_path.name if previous_path else None,
-                flags,
-            )
-            elapsed = time.perf_counter() - t0
+        with st.status("Preparing report…", expanded=True) as status:
+            report = analysis["report_markdown"]
             (REPORTS_DIR / "shift_report.md").write_text(report, encoding="utf-8")
-            st.write(f"✅ Done in {elapsed:.1f}s · saved to reports/shift_report.md")
+            st.write("✅ Using the report Claude wrote during analysis · saved to reports/shift_report.md")
             # Build the PDF now so it can auto-download in the browser.
             pdf_bytes = md_to_pdf(report)
             (REPORTS_DIR / "shift_report.pdf").write_bytes(pdf_bytes)
             st.write("📄 PDF built — downloading automatically…")
-            status.update(label=f"Report generated in {elapsed:.1f}s", state="complete", expanded=False)
+            status.update(label="Report ready", state="complete", expanded=False)
 
         st.session_state["report"] = report
         st.session_state["report_pdf"] = pdf_bytes

@@ -1,8 +1,10 @@
-"""Claude report generator — single fast Anthropic API call, no tool loop.
+"""Claude shift analysis — single structured-output API call.
 
-Prompt text lives in prompts/ (system_prompt.md, report_prompt.md) so the
-wording can change without touching this code. This module only turns
-pre-computed pandas data into the facts block and calls the API.
+Claude receives the raw shift CSV data (no pre-aggregation) and computes
+every total, breakdown, chart series, and anomaly itself, following the
+rules in prompts/system_prompt.md. This module only serializes the raw
+DataFrames to CSV text and parses the structured tool-call result — there
+is no arithmetic, threshold, or anomaly logic in Python.
 """
 
 import os
@@ -12,15 +14,154 @@ import anthropic
 import pandas as pd
 import streamlit as st
 
-from shift_metrics import pct_delta, totals
-
 PROMPTS_DIR = Path(__file__).parent / "prompts"
 
-# Fast model — the numbers are pre-computed in pandas, Claude only writes prose.
-REPORT_MODEL = "claude-haiku-4-5-20251001"
+# The model now performs real arithmetic (totals, aggregates, deltas), so it
+# needs to be a capable model rather than the fastest one.
+REPORT_MODEL = "claude-sonnet-5"
 
 SYSTEM_PROMPT = (PROMPTS_DIR / "system_prompt.md").read_text(encoding="utf-8").strip()
 REPORT_PROMPT_TEMPLATE = (PROMPTS_DIR / "report_prompt.md").read_text(encoding="utf-8")
+
+_TOTALS_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "units": {"type": "integer"},
+        "downtime": {"type": "integer"},
+        "defects": {"type": "integer"},
+        "defect_rate": {"type": "number", "description": "defects / units * 100"},
+    },
+    "required": ["units", "downtime", "defects", "defect_rate"],
+}
+
+ANALYSIS_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "current_totals": _TOTALS_SCHEMA,
+        "previous_totals": {
+            "anyOf": [_TOTALS_SCHEMA, {"type": "null"}],
+            "description": "null if no previous shift was provided",
+        },
+        "deltas": {
+            "type": "object",
+            "description": "Percent change current vs previous; null fields if no previous shift.",
+            "properties": {
+                "units_pct": {"type": ["number", "null"]},
+                "downtime_pct": {"type": ["number", "null"]},
+                "defects_pct": {"type": ["number", "null"]},
+                "defect_rate_pts": {"type": ["number", "null"], "description": "percentage-point change"},
+            },
+            "required": ["units_pct", "downtime_pct", "defects_pct", "defect_rate_pts"],
+        },
+        "by_line": {
+            "type": "array",
+            "items": {
+                "type": "object",
+                "properties": {
+                    "line": {"type": "string"},
+                    "units": {"type": "integer"},
+                    "units_prev": {"type": ["integer", "null"]},
+                    "units_delta_pct": {"type": ["number", "null"]},
+                    "defects": {"type": "integer"},
+                    "defect_rate": {"type": "number"},
+                },
+                "required": ["line", "units", "units_prev", "units_delta_pct", "defects", "defect_rate"],
+            },
+        },
+        "downtime_by_machine": {
+            "type": "array",
+            "description": "Only machines with total downtime > 0, sorted descending.",
+            "items": {
+                "type": "object",
+                "properties": {
+                    "machine": {"type": "string"},
+                    "line": {"type": "string"},
+                    "downtime_minutes": {"type": "integer"},
+                },
+                "required": ["machine", "line", "downtime_minutes"],
+            },
+        },
+        "anomalies": {
+            "type": "array",
+            "items": {
+                "type": "object",
+                "properties": {
+                    "severity": {"type": "string", "enum": ["bad", "warn"]},
+                    "message": {"type": "string"},
+                },
+                "required": ["severity", "message"],
+            },
+        },
+        "charts": {
+            "type": "object",
+            "properties": {
+                "units_by_time": {
+                    "type": "array",
+                    "description": "units_produced summed per (timestamp, line), one row per combination.",
+                    "items": {
+                        "type": "object",
+                        "properties": {
+                            "timestamp": {"type": "string"},
+                            "line": {"type": "string"},
+                            "units_produced": {"type": "integer"},
+                        },
+                        "required": ["timestamp", "line", "units_produced"],
+                    },
+                },
+                "defects_by_time": {
+                    "type": "array",
+                    "description": "defects summed per (timestamp, line), one row per combination.",
+                    "items": {
+                        "type": "object",
+                        "properties": {
+                            "timestamp": {"type": "string"},
+                            "line": {"type": "string"},
+                            "defects": {"type": "integer"},
+                        },
+                        "required": ["timestamp", "line", "defects"],
+                    },
+                },
+                "downtime_heatmap": {
+                    "type": "array",
+                    "description": "downtime_minutes summed per (machine, timestamp), only where > 0.",
+                    "items": {
+                        "type": "object",
+                        "properties": {
+                            "machine": {"type": "string"},
+                            "timestamp": {"type": "string"},
+                            "downtime_minutes": {"type": "integer"},
+                        },
+                        "required": ["machine", "timestamp", "downtime_minutes"],
+                    },
+                },
+                "machine_summary": {
+                    "type": "array",
+                    "description": "units, defects, downtime summed per (machine, line) across the whole shift.",
+                    "items": {
+                        "type": "object",
+                        "properties": {
+                            "machine": {"type": "string"},
+                            "line": {"type": "string"},
+                            "units": {"type": "integer"},
+                            "defects": {"type": "integer"},
+                            "downtime": {"type": "integer"},
+                        },
+                        "required": ["machine", "line", "units", "defects", "downtime"],
+                    },
+                },
+            },
+            "required": ["units_by_time", "defects_by_time", "downtime_heatmap", "machine_summary"],
+        },
+        "report_markdown": {
+            "type": "string",
+            "description": "The complete Markdown shift report, no code fences.",
+        },
+    },
+    "required": [
+        "current_totals", "previous_totals", "deltas", "by_line",
+        "downtime_by_machine", "anomalies", "charts", "report_markdown",
+    ],
+}
 
 
 def _get_api_key() -> str | None:
@@ -39,73 +180,19 @@ def _get_api_key() -> str | None:
         return None
 
 
-def _fmt_delta(cur_val, prev_val) -> str:
-    d = pct_delta(cur_val, prev_val)
-    return f"{d:+.1f}%" if d is not None else "n/a"
+def _csv_block(df: pd.DataFrame, label: str) -> str:
+    return f"--- {label} ---\n{df.to_csv(index=False)}"
 
 
-def build_facts(cur: pd.DataFrame, prev: pd.DataFrame | None,
-                cur_name: str, prev_name: str | None,
-                flags: list[tuple[str, str]]) -> str:
-    """Turn the already-computed pandas data into a compact facts block."""
-    ct = totals(cur)
-    pt = totals(prev) if prev is not None else None
-    L: list[str] = []
-
-    L.append(f"Current shift file: {cur_name} "
-             f"({cur['timestamp'].nunique()} intervals, "
-             f"{cur['timestamp'].min()}-{cur['timestamp'].max()})")
+def analyze_shift(cur: pd.DataFrame, prev: pd.DataFrame | None,
+                  cur_name: str, prev_name: str | None) -> dict:
+    """Send the raw shift CSV data to Claude and return its full structured analysis."""
+    blocks = [_csv_block(cur, f"CURRENT SHIFT ({cur_name})")]
     if prev is not None:
-        L.append(f"Previous shift file: {prev_name} ({prev['timestamp'].nunique()} intervals)")
+        blocks.append(_csv_block(prev, f"PREVIOUS SHIFT ({prev_name})"))
     else:
-        L.append("Previous shift: NONE — no comparison available.")
-
-    L.append("\nOVERALL TOTALS:")
-    if pt:
-        L.append(f"- Units produced: {ct['units']} (previous {pt['units']}, {_fmt_delta(ct['units'], pt['units'])})")
-        L.append(f"- Downtime minutes: {ct['downtime']} (previous {pt['downtime']}, {_fmt_delta(ct['downtime'], pt['downtime'])})")
-        L.append(f"- Defects: {ct['defects']} (previous {pt['defects']}, {_fmt_delta(ct['defects'], pt['defects'])})")
-        L.append(f"- Defect rate: {ct['defect_rate']:.2f}% (previous {pt['defect_rate']:.2f}%)")
-    else:
-        L.append(f"- Units produced: {ct['units']}")
-        L.append(f"- Downtime minutes: {ct['downtime']}")
-        L.append(f"- Defects: {ct['defects']}")
-        L.append(f"- Defect rate: {ct['defect_rate']:.2f}%")
-
-    cu = cur.groupby("line")["units_produced"].sum()
-    pu = prev.groupby("line")["units_produced"].sum() if prev is not None else None
-    L.append("\nUNITS BY LINE:")
-    for line in cu.index:
-        if pu is not None:
-            L.append(f"- Line {line}: {int(cu[line])} "
-                     f"(previous {int(pu.get(line, 0))}, {_fmt_delta(cu[line], pu.get(line, 0))})")
-        else:
-            L.append(f"- Line {line}: {int(cu[line])}")
-
-    cf = cur.groupby("line")["defects"].sum()
-    cfu = cur.groupby("line")["units_produced"].sum()
-    L.append("\nDEFECTS BY LINE (defects, rate%):")
-    for line in cf.index:
-        rate = (cf[line] / cfu[line] * 100) if cfu[line] else 0
-        L.append(f"- Line {line}: {int(cf[line])} ({rate:.2f}%)")
-
-    dm = cur.groupby(["line", "machine"])["downtime_minutes"].sum()
-    dm = dm[dm > 0].sort_values(ascending=False)
-    L.append("\nDOWNTIME BY MACHINE (>0 min):")
-    L.extend([f"- {machine} (Line {line}): {int(mins)} min" for (line, machine), mins in dm.items()]
-             or ["- none"])
-
-    L.append("\nDETECTED ANOMALIES (include EVERY one of these in the Exceptions section):")
-    L.extend([f"- [{sev.upper()}] {msg}" for sev, msg in flags] or ["- none detected"])
-
-    return "\n".join(L)
-
-
-def generate_report(cur: pd.DataFrame, prev: pd.DataFrame | None,
-                    cur_name: str, prev_name: str | None,
-                    flags: list[tuple[str, str]]) -> str:
-    facts = build_facts(cur, prev, cur_name, prev_name, flags)
-    prompt = REPORT_PROMPT_TEMPLATE.format(facts=facts)
+        blocks.append("PREVIOUS SHIFT: none provided — comparison and delta-based anomalies are unavailable.")
+    prompt = REPORT_PROMPT_TEMPLATE.format(data="\n\n".join(blocks))
 
     api_key = _get_api_key()
     if not api_key:
@@ -119,8 +206,14 @@ def generate_report(cur: pd.DataFrame, prev: pd.DataFrame | None,
     try:
         message = client.messages.create(
             model=REPORT_MODEL,
-            max_tokens=4096,
+            max_tokens=8192,
             system=SYSTEM_PROMPT,
+            tools=[{
+                "name": "record_shift_analysis",
+                "description": "Record the complete computed shift analysis and report.",
+                "input_schema": ANALYSIS_SCHEMA,
+            }],
+            tool_choice={"type": "tool", "name": "record_shift_analysis"},
             messages=[{"role": "user", "content": prompt}],
         )
     except anthropic.AuthenticationError as e:
@@ -130,11 +223,8 @@ def generate_report(cur: pd.DataFrame, prev: pd.DataFrame | None,
     except anthropic.APIStatusError as e:
         raise RuntimeError(f"Anthropic API error ({e.status_code}): {e.message}") from e
 
-    output = "".join(b.text for b in message.content if b.type == "text").strip()
-    if output.startswith("```"):
-        nl = output.find("\n")
-        if nl != -1:
-            output = output[nl + 1:]
-        if output.rstrip().endswith("```"):
-            output = output.rstrip()[:-3]
-    return output.strip()
+    for block in message.content:
+        if block.type == "tool_use" and block.name == "record_shift_analysis":
+            return block.input
+
+    raise RuntimeError("Claude did not return a structured shift analysis.")
