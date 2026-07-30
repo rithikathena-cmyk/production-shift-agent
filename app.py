@@ -92,15 +92,18 @@ def _table_col_widths(headers: list[str]) -> list[str]:
     h = [x.strip().lower() for x in headers]
     joined = " | ".join(h)
     n = len(h) or 1
-    if "machine" in h and "notes" in joined:        # Downtime
+    if "machine" in joined and "notes" in joined:   # Downtime
         return ["10%", "24%", "20%", "46%"]
     if "vs previous shift" in joined:               # Production
         return ["18%", "38%", "44%"]
     if "defect rate" in joined:                     # Defects
         return ["28%", "30%", "42%"]
-    if "metric" in h:                               # Comparison
+    if "metric" in joined:                          # Comparison
         return ["28%", "24%", "24%", "24%"]
-    return [f"{100 // n}%"] * n                      # equal fallback
+    base = 100 // n                                 # equal fallback, remainder to last column
+    widths = [f"{base}%"] * n
+    widths[-1] = f"{100 - base * (n - 1)}%"
+    return widths
 
 
 def _apply_col_widths(html_body: str) -> str:

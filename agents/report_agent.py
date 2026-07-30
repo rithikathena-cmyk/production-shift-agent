@@ -204,9 +204,13 @@ def analyze_shift(cur: pd.DataFrame, prev: pd.DataFrame | None,
 
     client = anthropic.Anthropic(api_key=api_key)
     try:
-        message = client.messages.create(
+        # Streamed with a generous budget: the model reasons (adaptive thinking,
+        # on by default for this model) and then emits large chart-series arrays
+        # before writing report_markdown, so a tight max_tokens can silently
+        # truncate the report — the symptom is an empty/blank PDF downstream.
+        with client.messages.stream(
             model=REPORT_MODEL,
-            max_tokens=8192,
+            max_tokens=32000,
             system=SYSTEM_PROMPT,
             tools=[{
                 "name": "record_shift_analysis",
@@ -215,7 +219,8 @@ def analyze_shift(cur: pd.DataFrame, prev: pd.DataFrame | None,
             }],
             tool_choice={"type": "tool", "name": "record_shift_analysis"},
             messages=[{"role": "user", "content": prompt}],
-        )
+        ) as stream:
+            message = stream.get_final_message()
     except anthropic.AuthenticationError as e:
         raise RuntimeError("Anthropic API key is invalid or revoked.") from e
     except anthropic.RateLimitError as e:
@@ -223,8 +228,16 @@ def analyze_shift(cur: pd.DataFrame, prev: pd.DataFrame | None,
     except anthropic.APIStatusError as e:
         raise RuntimeError(f"Anthropic API error ({e.status_code}): {e.message}") from e
 
+    if message.stop_reason == "max_tokens":
+        raise RuntimeError(
+            "Claude's analysis was cut off before finishing (hit the max_tokens limit). "
+            "Try again, or use a smaller shift file."
+        )
+
     for block in message.content:
         if block.type == "tool_use" and block.name == "record_shift_analysis":
+            if not block.input.get("report_markdown"):
+                raise RuntimeError("Claude returned an analysis with no report text — please retry.")
             return block.input
 
     raise RuntimeError("Claude did not return a structured shift analysis.")
