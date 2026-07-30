@@ -7,7 +7,6 @@ import altair as alt
 import markdown as md
 import pandas as pd
 import streamlit as st
-import streamlit.components.v1 as components
 from xhtml2pdf import pisa
 
 from agents.report_agent import REPORT_MODEL, analyze_shift
@@ -472,7 +471,7 @@ if st.button("🚀 Generate Shift Report", type="primary", width="stretch"):
         # The anchor is created in the PARENT document to escape the component
         # iframe's sandbox, which otherwise blocks downloads.
         b64 = base64.b64encode(pdf_bytes).decode()
-        components.html(
+        st.iframe(
             f"""
             <script>
               (function() {{
